@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Optimized Fluid 3D Pipes Screensaver - Three.js</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background-color: rgba(0, 0, 0);
+    }
+    #fps {
+      position: absolute;
+      top: 0;
+      left: 0;
+      color: #00ff00;
+      font-family: monospace;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 5px;
+      z-index: 1000;
+    }
+  </style>
+</head>
+<body>
+  <div id="fps">FPS: 0</div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    const NUM_PIPES = 20;
+    const GRID_SIZE = [25, 25, 25];
+    const SPACING = 60;
+    const STEP_TIME = 60;
+    const COLOR_CYCLE_SPEED = 0.00005;
+    const OFFSET_RANGE = 750;
+
+    const CAMERA_DISTANCE = 1200;
+    const SAMPLES_PER_SEGMENT = 6;
+    const TUBE_RADIUS = 12.5;
+    const TUBE_RADIAL_SEGMENTS = 8;
+    const MAX_POINTS = 30;
+
+    function randomRange(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    class Pipe {
+      constructor(scene) {
+        this.scene = scene;
+        this.reset();
+        this.needsGeometryUpdate = true;
+
+        // Shader material setup
+        this.uniforms = {
+          color: { value: new THREE.Color() },
+        };
+        this.material = new THREE.ShaderMaterial({
+          uniforms: this.uniforms,
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform vec3 color;
+            varying vec2 vUv;
+            void main() {
+              float alpha = smoothstep(0.0, 0.3, vUv.x); // Smooth fade effect
+              gl_FragColor = vec4(color, alpha * 0.8); // Apply base opacity
+            }
+          `,
+          transparent: true,
+          side: THREE.DoubleSide,
+        });
+
+        const startPoint = this.getWorldCoord(this.path[0]);
+        const dummyEnd = startPoint.clone().add(new THREE.Vector3(1, 0, 0));
+        const dummyCurve = new THREE.CatmullRomCurve3([startPoint, dummyEnd]);
+        this.geometry = new THREE.TubeGeometry(dummyCurve, 1, TUBE_RADIUS, TUBE_RADIAL_SEGMENTS, false);
+        this.mesh = new THREE.Mesh(this.geometry, this.material);
+        scene.add(this.mesh);
+      }
+
+      reset() {
+        this.offset = new THREE.Vector3(
+          randomRange(-OFFSET_RANGE, OFFSET_RANGE),
+          randomRange(-OFFSET_RANGE, OFFSET_RANGE),
+          randomRange(-OFFSET_RANGE, OFFSET_RANGE)
+        );
+        this.path = [];
+        this.occupied = new Set();
+        const startX = Math.floor(GRID_SIZE[0] / 2);
+        const startY = Math.floor(GRID_SIZE[1] / 2);
+        const startZ = Math.floor(GRID_SIZE[2] / 2);
+        this.path.push([startX, startY, startZ]);
+        this.occupied.add(this.coordKey([startX, startY, startZ]));
+        this.baseHue = Math.random();
+        this.lastStepTime = Date.now();
+        this.needsGeometryUpdate = true;
+      }
+
+      coordKey(cell) { return cell.join(','); }
+
+      getWorldCoord(cell) {
+        const cx = (GRID_SIZE[0] - 1) / 2;
+        const cy = (GRID_SIZE[1] - 1) / 2;
+        const cz = (GRID_SIZE[2] - 1) / 2;
+        return new THREE.Vector3(
+          this.offset.x + (cell[0] - cx) * SPACING,
+          this.offset.y + (cell[1] - cy) * SPACING,
+          this.offset.z + (cell[2] - cz) * SPACING
+        );
+      }
+
+      step() {
+        const directions = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+        for (let i = directions.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [directions[i], directions[j]] = [directions[j], directions[i]];
+        }
+        const current = this.path[this.path.length - 1];
+        for (const d of directions) {
+          const nextCell = [current[0] + d[0], current[1] + d[1], current[2] + d[2]];
+          if (nextCell[0] < 0 || nextCell[0] >= GRID_SIZE[0] ||
+              nextCell[1] < 0 || nextCell[1] >= GRID_SIZE[1] ||
+              nextCell[2] < 0 || nextCell[2] >= GRID_SIZE[2]) continue;
+          if (this.occupied.has(this.coordKey(nextCell))) continue;
+          this.path.push(nextCell);
+          this.occupied.add(this.coordKey(nextCell));
+          return true;
+        }
+        return false;
+      }
+
+      update(currentTime) {
+        if (currentTime - this.lastStepTime > STEP_TIME) {
+          if (!this.step()) {
+            this.reset();
+          } else {
+            this.needsGeometryUpdate = true;
+          }
+          this.lastStepTime = currentTime;
+        }
+      }
+
+      updateMesh(currentTime) {
+        const hue = (this.baseHue + currentTime * COLOR_CYCLE_SPEED) % 1.0;
+        this.uniforms.color.value.setHSL(hue, 1.0, 0.5);
+
+        if (!this.needsGeometryUpdate) return;
+        let points = this.path.map(cell => this.getWorldCoord(cell));
+        if (points.length > MAX_POINTS) points = points.slice(-MAX_POINTS);
+        if (points.length < 2) return;
+
+        const curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.5);
+        const numPoints = Math.max(points.length * SAMPLES_PER_SEGMENT, 20);
+        const tubularSegments = Math.max(numPoints - 1, 2);
+
+        if (this.mesh.geometry) this.mesh.geometry.dispose();
+        this.mesh.geometry = new THREE.TubeGeometry(curve, tubularSegments, TUBE_RADIUS, TUBE_RADIAL_SEGMENTS, false);
+        this.needsGeometryUpdate = false;
+      }
+    }
+
+    let scene, camera, renderer;
+    let pipes = [];
+    let fpsDiv;
+    let lastFpsTime = performance.now();
+    let frameCount = 0;
+
+    function init() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1A1A1D);
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 5000);
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(width, height);
+      document.body.appendChild(renderer.domElement);
+
+      const ambientLight = new THREE.AmbientLight(0x404040);
+      scene.add(ambientLight);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      directionalLight.position.set(1, 1, 1);
+      scene.add(directionalLight);
+
+      for (let i = 0; i < NUM_PIPES; i++) {
+        pipes.push(new Pipe(scene));
+      }
+
+      fpsDiv = document.getElementById('fps');
+      window.addEventListener('resize', onWindowResize, false);
+      animate();
+    }
+
+    function onWindowResize() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const currentTime = Date.now();
+      const now = performance.now();
+      frameCount++;
+      if (now - lastFpsTime >= 1000) {
+        fpsDiv.innerHTML = `FPS: ${Math.round(frameCount * 1000 / (now - lastFpsTime))}`;
+        lastFpsTime = now;
+        frameCount = 0;
+      }
+
+      pipes.forEach(pipe => {
+        pipe.update(currentTime);
+        pipe.updateMesh(currentTime);
+      });
+
+      const theta = currentTime * 0.0002;
+      const phi = Math.PI / 6 + Math.sin(currentTime * 0.0005) * Math.PI / 12;
+      camera.position.set(
+        CAMERA_DISTANCE * Math.sin(phi) * Math.cos(theta),
+        CAMERA_DISTANCE * Math.sin(phi) * Math.sin(theta),
+        CAMERA_DISTANCE * Math.cos(phi)
+      );
+      camera.lookAt(0, 0, 0);
+      renderer.render(scene, camera);
+    }
+
+    init();
+  </script>
+</body>
+</html>
